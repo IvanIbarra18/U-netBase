@@ -157,7 +157,7 @@ python data/splits.py --dataset ISIC --folds 5 --validation 10 --seed 42
 | `--seed` | `42` | Random seed |
 | `--lr` | `0.0001` | Learning rate |
 | `--output` | `checkpoints` | Output directory |
-| `--experiment_name` | No CSV | Optional name for the per-epoch CSV |
+| `--experiment-name` | No CSV | Optional name for the per-epoch CSV (`--experiment_name` is also accepted) |
 
 Example using a rectangular crop:
 
@@ -167,8 +167,11 @@ python train.py --dataset ISBI --precision FP16 --epochs 50 --crop 256 384
 
 FP16 and BF16 use automatic mixed precision (AMP) when training on CUDA.
 FP16 also uses gradient scaling. On CPU, training runs without AMP. The loss
-combines binary cross-entropy and Dice; Dice is calculated on the binary
-segmentation.
+combines binary cross-entropy and soft Dice. The Dice score is calculated on
+the binary segmentation. When `--experiment-name` is set, the per-epoch CSV
+includes the training BCE and Dice losses, their weighted contributions to
+the total loss, the corresponding validation loss components, and the training
+and validation Dice scores.
 
 ## Results and monitoring
 
@@ -227,3 +230,12 @@ By default, the generated images and masks are saved to
 `datasets/subset_ISIC/imgs` and `datasets/subset_ISIC/masks`. Use
 `--images-dir`, `--masks-dir`, and `--output-dir` to change the input and
 output directories.
+
+Rename the paired images and masks in `datasets/test_ISIC` to matching
+`sample_000000` names. The script first shows the planned changes; add
+`--apply` to perform them:
+
+```bash
+python rename_test_isic.py
+python rename_test_isic.py --apply
+```

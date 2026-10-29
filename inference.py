@@ -1,96 +1,104 @@
-"""Model Inference
+from time import perf_counter
 
-author: Masahiro Hayashi
-
-This script allows users to make inference and visualize results.
-"""
-import os
-import argparse
 import torch
-from torchvision import transforms
-import numpy as np
-from skimage import io, transform
-from matplotlib import pyplot as plt
-from matplotlib import image as mpimg
 
-from unet import UNet
+from utilis.metrics import dice_score
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description='Make segmentation predicitons'
-    )
-    parser.add_argument(
-        '--model', type=str, default='UNet50.pt',
-        help='model to use for inference'
-    )
-    parser.add_argument(
-        '--visualize', action='store_true', default=False,
-        help='visualize the inference result'
-    )
-    args = parser.parse_args()
-    return args
 
-def predict(image, model):
-    """Make prediction on image"""
-    mean = 0.495
-    std = 0.173
-    image_transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean, std),
-        transforms.Pad(30, padding_mode='reflect')
-    ])
-    im = image_transform(image)
-    im = im.view(1, *im.shape)
+@torch.inference_mode()
+def predict(model, images, use_tta=False, threshold=0.5):
+    """
+    Generate binary segmentation masks.
+
+    Args:
+        model: Trained segmentation model.
+        images: Input batch with shape (B, C, H, W).
+        use_tta: Whether to use horizontal and vertical flip TTA.
+        threshold: Probability threshold for binary predictions.
+
+    Returns:
+        Binary masks with shape (B, 1, H_out, W_out).
+    """
     model.eval()
-    y_pred = model(im)
-    pred = torch.argmax(y_pred, dim=1)[0]
-    return pred
 
-def visualize(image, pred, label=None):
-    """make visualization"""
-    n_plot = 2 if label is None else 3
-    fig = plt.figure()
-    ax = fig.add_subplot(1, n_plot, 1)
-    imgplot = plt.imshow(image)
-    ax.set_title('Image')
-    ax = fig.add_subplot(1, n_plot, 2)
-    imgplot = plt.imshow(pred)
-    ax.set_title('Prediction')
-    if n_plot > 2:
-        ax = fig.add_subplot(1, n_plot, 3)
-        imgplot = plt.imshow(label)
-        ax.set_title('Ground Truth')
-    fig.tight_layout()
-    plt.savefig(f'visualization/{args.model[:-3]}_validation.png')
-    plt.show()
+    logits = model(images)
+    probabilities = torch.sigmoid(logits)
 
-if __name__ == '__main__':
-    args = parse_args()
+    if use_tta:
+        # Horizontal flip
+        flipped_h = torch.flip(images, dims=[3])
+        logits_h = model(flipped_h)
+        probabilities_h = torch.sigmoid(torch.flip(logits_h, dims=[3]))
 
-    # load images and labels
-    path = os.getcwd() + '/data/train-volume.tif'
-    images = io.imread(path)
-    label_path = os.getcwd() + '/data/train-labels.tif'
-    labels = io.imread(label_path)
-    image = images[-1]
-    label = labels[-1]
+        # Vertical flip
+        flipped_v = torch.flip(images, dims=[2])
+        logits_v = model(flipped_v)
+        probabilities_v = torch.sigmoid(torch.flip(logits_v, dims=[2]))
 
-    # load model
-    checkpoint_path = os.getcwd() + f'/models/{args.model}'
-    checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
-    model = UNet(2)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    # make inference
-    pred = predict(image, model)
+        # Both flips
+        flipped_hv = torch.flip(images, dims=[2, 3])
+        logits_hv = model(flipped_hv)
+        probabilities_hv = torch.sigmoid(torch.flip(logits_hv, dims=[2, 3]))
 
-    if args.visualize:
-        # crop images for visualization
-        dim = image.shape
-        out_size = pred.shape[0]
-        cut = (dim[0] - out_size) // 2
-        image = image[cut:cut+out_size, cut:cut+out_size]
-        label = label[cut:cut+out_size, cut:cut+out_size]
-        # visualize result
-        visualize(image, pred, label)
+        probabilities = (
+            probabilities
+            + probabilities_h
+            + probabilities_v
+            + probabilities_hv
+        ) / 4.0
+
+    return (probabilities >= threshold).float()
 
 
+@torch.inference_mode()
+def evaluate_inference(model,data_loader,device,use_tta=False,threshold=0.5,):
+    """
+    Evaluate a trained model using Dice scores.
+
+    Returns:
+        Dictionary with mean Dice and inference throughput.
+    """
+    model.eval()
+
+    dice_scores = []
+    num_images = 0
+    start_time = perf_counter()
+
+    for images, masks in data_loader:
+        images = images.to(device, non_blocking=True)
+        masks = masks.to(device, non_blocking=True).float()
+
+        predictions = predict(model,images,use_tta=use_tta,threshold=threshold,)
+
+        # dice_score expects logits, so convert probabilities back
+        # to logits only if evaluating TTA probabilities.
+        # For consistency, compute Dice directly from binary masks.
+        if masks.shape[-2:] != predictions.shape[-2:]:
+            h, w = predictions.shape[-2:]
+            target_h, target_w = masks.shape[-2:]
+
+            top = (target_h - h) // 2
+            left = (target_w - w) // 2
+            masks = masks[..., top:top + h, left:left + w]
+
+        intersection = (predictions * masks).sum(dim=(1, 2, 3))
+        denominator = predictions.sum(dim=(1, 2, 3)) + masks.sum(dim=(1, 2, 3))
+
+        scores = (2.0 * intersection + 1e-8) / (denominator + 1e-8)
+
+        dice_scores.extend(scores.cpu().tolist())
+        num_images += images.shape[0]
+
+    elapsed = perf_counter() - start_time
+
+    return {
+        "mean_dice": (
+            sum(dice_scores) / len(dice_scores)
+            if dice_scores else 0.0
+        ),
+        "num_images": num_images,
+        "elapsed_seconds": elapsed,
+        "images_per_second": (
+            num_images / elapsed if elapsed > 0 else 0.0
+        ),
+    }

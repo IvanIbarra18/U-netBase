@@ -1,6 +1,24 @@
+# Python
 __pycache__/
-runs/
-test.py
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Extracted datasets and generated training artifacts
+/datasets/
+/runs/
+/checkpoints/
+
+# Ignore other dataset archives, but keep the archive intended for upload.
+*.zip
+!/datasets.zip
+
+# Local and editor files
+.DS_Store
 *.sublime*
-models/
-visualization/unet*_*
+
+datasets.zip
